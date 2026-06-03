@@ -335,3 +335,11 @@ while task_running:
 python scripts/graspvla_client.py --host 128.32.164.89 --port 6666 --text "pick up bottle"
 # 看到 action shape (8,7)、goal、"✓ 闭环 OK" 即链路通
 ```
+
+### 11.8 动作侧集成骨架 `scripts/run_graspvla_dexmate.py`(雷蛇开发起点)
+已写好**编排 + 全部坐标数学**(已干跑验证,闭环向抓取点收敛),机器人调用留成抽象接口待填:
+- ✅ 已写对(与机器人无关):`ree_pose_to_proprio()`(R_ee FK→sim-EEF→graspvla 7 维)、`delta_to_ree_target()`(Δ→R_ee 目标位姿,Franka 同款 `R=ΔR@R_cur`)、sim-EEF↔R_ee 姿态对齐、z±0.75、闭环主循环。
+- 🟡 **雷蛇填**:`DexmateRobot` 的 `get_images / get_ree_pose_base / get_gripper_m11 / move_ree / set_gripper`(每个方法 docstring 已指向对应 V2AP 文件)。
+- ⚠️ **必须标定** `T_REE_TO_SIMEEF`:含 R_ee 的 **±90° z 旋转**(方向待定)+ **Sharpa 虚拟 TCP 平移偏移**。文件顶部 `EEF_ALIGN_RPY_SXYZ / EEF_ALIGN_XYZ` 是待验证先验,用"小幅试动作+看夹爪朝向"标定(README §5 开放项)。
+- 干跑(不接机器人):`python scripts/run_graspvla_dexmate.py --dry-run --host 127.0.0.1`(本机)。真机:写 `DexmateRobot` 子类,去掉 `--dry-run`。
+- 用 scipy(雷蛇 env 已有),不依赖 transforms3d。
