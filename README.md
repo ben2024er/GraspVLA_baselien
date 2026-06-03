@@ -3,7 +3,7 @@
 把 **GraspVLA**(抓取基础模型,原为 Franka + 平行夹爪)部署到 **Dexmate Vega(双臂)+ Sharpa HA4 灵巧手**。
 本文件是项目的**唯一权威文档(living doc)**:记录我们在做什么、调研结论、关键参数、注意点、进度与待办。新接手的人/agent 请先通读本文件 + `HANDOFF.md`。
 
-> 最近更新:2026-06-02
+> 最近更新:2026-06-03
 
 ---
 
@@ -15,15 +15,18 @@
 | 坐标系映射设计(graspvla_base) | ✅ 锁定 `p_graspvla = p_base − (0,0,0.75)` |
 | 相机选型 + 摆位几何 | ✅ Logitech BRIO ×2,坐标已换算到 Dexmate base |
 | **物理摆放 front + side 相机** | ✅ **已摆放完成**（2026-06-02） |
-| BRIO 采集层(OpenCV)+ 78° 裁剪 → 256×256 | ⏳ 待做（next） |
-| 起 GraspVLA server(需 GPU,~9GB) | ⏳ 待做 |
-| 静态感知验证(bbox/goal,不动机器人) | ⏳ 待做 |
-| 坐标变换代码 + 接 V2AP IK/安全层 | ⏳ 待做 |
+| BRIO 采集层(OpenCV)+ 裁剪 → 256×256 | ✅ **完成** `scripts/brio_capture.py`、`scripts/capture_views.py`(§10) |
+| proprio_array(右臂 FK + 右手夹爪,接 V2AP) | ✅ **完成** `scripts/robot_proprio.py`,真机实测通(§10) |
+| 三路输入打包(2×RGB + proprio + text → obs.pkl) | ✅ **完成** `scripts/capture_views.py`(§10) |
+| GraspVLA conda 环境 + 权重下载 | ✅ env `GraspVLA`(py3.9.19);权重在 HF cache(~12GB)|
+| 起 GraspVLA server(需 GPU,~9GB) | ⚠️ 受阻:`requirements.txt` 缺 `einops`;本机 GPU 仅 8GB(<9GB,可能 OOM)(§10.5) |
+| 静态感知验证(bbox/goal,不动机器人) | ⏳ 待做(server 起来后)|
+| 接 V2AP IK/安全层 → 动作执行 | ⏳ 待做 |
 | 真机抓取实测 | ⏳ 待做 |
 
-**下一步(立即)**:打通 BRIO 采集 + 肉眼核对相机视角 → 起 server → 静态 bbox 感知验证(全程不动机器人,先把"相机+坐标系"链路验证掉)。详见 §7。
+**下一步(立即)**:`pip install einops` 补依赖 → 起 server(8GB 显存可能 OOM,详见 §10.5)→ 用已采集的 `scripts/brio_out/obs.pkl` 发给 server 做静态 bbox 感知验证。
 
-**开发机迁移**:接下来开发将搬到**与机器人直连的电脑**上进行。交接说明见 `HANDOFF.md`。
+**当前机器**:已在**与机器人直连的电脑**(blade15)上;机器人 `ROBOT_NAME=dm/vgd1262ab823-1p`、`ROBOT_IP=192.168.50.20`(见 `V2AP-demo/setup.sh`)。相机:front=`/dev/video5`、side=`/dev/video9`。
 
 ---
 
@@ -141,12 +144,12 @@ GraspVLA 的动作接口是笛卡尔 eef + 二值夹爪,**embodiment-agnostic**,
 
 ## 6. 部署主路线(建议顺序)
 
-1. ✅ 摆相机(§3.3)+ 设 BRIO 78°(§3.1)。
-2. ⏳ BRIO 采集层 + 78° 裁剪 → 256×256,肉眼核对视角。
-3. ⏳ 冻结 torso/head(§2)。
-4. ⏳ 起 GraspVLA server(HF 权重),先用 `offline_test` 发 mock 验证服务通。
-5. ⏳ 静态感知验证:放物体 → 拍 front+side + dummy proprio → server 回 bbox/goal,验证相机+坐标系。
-6. ⏳ 写坐标变换(proprio: 仅 z−0.75;action: 透传;Sharpa 虚拟 TCP + gripper 映射)。
+1. ✅ 摆相机(§3.3)。BRIO 78° 预设 Linux 设不了,默认 90°(§10.1),靠 `--crop-scale`/静态验证微调。
+2. ✅ BRIO 采集层 + 裁剪 → 256×256(`scripts/brio_capture.py`、`capture_views.py`,§10)。
+3. ✅ proprio 坐标变换(z−0.75、sxyz、gripper[-1,1])已实现在 `scripts/robot_proprio.py`(§10.3)。运行期仍需冻结 torso/head(§2)。
+4. ⚠️ 起 GraspVLA server:缺 `einops`、8GB 显存可能 OOM(§10.5)。
+5. ⏳ 静态感知验证:用 `scripts/brio_out/obs.pkl` 发 server 回 bbox/goal,验证相机+坐标系(§7、§10.5)。
+6. ⏳ action 侧:透传 + Sharpa 虚拟 TCP + gripper 映射(§4)。**`R_ee` 姿态 ±90° z 偏移待补**(§5、§10.3)。
 7. ⏳ 接 V2AP 的 IK + 安全层 → 真机抓取,按 §5 逐项调。
 
 ---
@@ -180,3 +183,68 @@ GraspVLA 的动作接口是笛卡尔 eef + 二值夹爪,**embodiment-agnostic**,
 ## 9. 交接
 
 开发将迁移到与机器人直连的电脑。**新接手者请读 `HANDOFF.md`**(环境、依赖、如何跑、坑、联系方式)。
+
+---
+
+## 10. 部署代码(本仓库 `scripts/`,2026-06-03 新增)
+
+把"采集 → 打包 GraspVLA 三路输入 → (待)发 server"这条链路实现成了几个独立脚本。**全部在机器人电脑上跑;采 proprio 的部分要用机器人 conda 环境 `sharpa-dexmate-tmp`(有 dexcontrol/pinocchio/pink/sharpa,且也有 cv2),纯相机部分两个环境都行。**
+
+### 10.1 `scripts/brio_capture.py` — 单相机采集 + GraspVLA 裁剪(底层蓝本)
+- `BrioCamera`:OpenCV `VideoCapture`(CAP_V4L2,MJPG@1080p),**中心方裁 → resize 256×256 cubic**(照搬原 `cameras.py` 裁剪逻辑:保留垂直 FOV、裁水平)。BGR→RGB。
+- `build_graspvla_obs()` / `_validate_obs()`:按 `serve.py` 契约拼/校验 obs 字典。
+- CLI:`preview`(实时双路+中心十字,肉眼核对 §3.3)、`snapshot`、`test`(可 `--send` 直接发 server 做 bbox 验证,含 `goal+(0,0,0.75)→base` 映射)。
+- **FOV 提醒**:BRIO 的 65/78/90° 预设是 Logitech UVC 扩展,**Linux 的 v4l2 设不了**(默认 90°),只能用 Win/Mac 的 Logi Tune 设;或用 `--crop-scale <1.0` 软件模拟更窄 FOV(90°→~0.8)。
+
+### 10.2 `scripts/show_cameras.py` — 双相机实时预览(对相机用)
+- 自动检测**外接**相机(BRIO + RealSense 彩色流;**排除笔记本内置摄像头**),并存读其彩色节点(跳过 RealSense 的深度/IR 节点)。
+- 掉线自动重连(NO SIGNAL 占位),按 `q` 退、`s` 存图、`r` 重开。画面叠加中心十字 + 绿色裁剪框(= GraspVLA 实际裁的方形区域)。
+- 例:`python scripts/show_cameras.py --devices /dev/video5,/dev/video9`
+
+### 10.3 `scripts/robot_proprio.py` — 右臂 FK + 右手夹爪 → 7D proprio(接 V2AP)
+> **只取右臂 + 右手**(按需求)。需机器人 env;真机实测已通。
+- `RightArmProprioReader`:`dexcontrol.robot.Robot()` 连机器人 → 读 `right_arm`(+`left_arm`)关节 → `teleop.ik_utils.PinkLocalIK.fk(["R_ee"])` 算末端位姿。**用机器人实时 torso/head 建模**(运行期冻结 torso/head,FK 才准)。
+- **坐标**:位置 z **减 0.75**(→ GraspVLA base,见 §2);x/y/姿态透传。姿态用 Euler **`sxyz`**(scipy `as_euler('xyz')` 等价 transforms3d `sxyz`)。
+- **夹爪**:读右手 Sharpa 22 维关节,把拇指+食指(idx 0–8)投影到 `HAND_PINCH_OPEN↔CLOSED` 轴得开合比例 → 映射到 **[-1,1]**(+1 开 / -1 合;server 再 `(g+1)/2→[0,1]`)。
+- `read_history(n,dt)` 出 ≥4 步(server 读 `[-4]`、`[-1]`)。`--no-gripper` 可跳过连手(只读臂)。
+- ⚠️ **姿态旋转未处理**:`R_ee` vs GraspVLA sim-EEF 的 ±90° z 偏移(§5)是**透传未补**的独立待解项。
+
+### 10.4 `scripts/capture_views.py` — ⭐ 一条命令产出 GraspVLA 全部三路输入
+把 2×RGB + proprio + text 一次性采好,**全部写进一个文件夹**,可直接喂 GraspVLA。
+```bash
+# 机器人 env 里跑(含真机 proprio):
+conda run -n sharpa-dexmate-tmp python scripts/capture_views.py \
+  --front /dev/video5 --side /dev/video9 \
+  --object "red can" --proprio \
+  --robot-name dm/vgd1262ab823-1p --robot-ip 192.168.50.20 \
+  --outdir scripts/brio_out
+```
+输出文件夹(默认 `brio_out/`):
+
+| 文件 | 内容 | GraspVLA 字段 |
+|---|---|---|
+| `front_view.png` | 256×256×3 uint8 RGB | `front_view_image` |
+| `side_view.png` | 256×256×3 uint8 RGB | `side_view_image` |
+| `proprio_array.npy` | `(steps,7)` float32 `[x,y,z,r,p,y,grip]`,sxyz,grip∈[-1,1] | `proprio_array` |
+| `text.txt` | `"pick up {object}"` | `text` |
+| **`obs.pkl`** | **完整 pickled dict = `serve.py` 直接收的格式** | 整个 obs |
+
+- `--object X` → `"pick up X"`;或 `--text` 给整句。不加 `--proprio` 则用 dummy proprio(纯相机,可在 GraspVLA env 跑)。
+- 复用:`load_bundle("brio_out")` 或直接 `pickle.load(obs.pkl)` → ZMQ 发给 server,**无需重新拼**。
+- 当前已采的数据在 `scripts/brio_out/`。
+
+### 10.5 起 server(README 主仓 §Model Server)+ 已知坑
+```bash
+PYTHONPATH=<repo>/GraspVLA conda run -n GraspVLA python3 -u -m vla_network.scripts.serve \
+  --path ~/.cache/huggingface/hub/models--shengliangd--GraspVLA/snapshots/<hash>/checkpoint/model.safetensors \
+  --port 6666
+```
+- ⚠️ **坑 1:缺 `einops`**。`GraspVLA/requirements.txt` 没列,但 `modeling_internlm2.py` 要 import。先 `conda run -n GraspVLA pip install einops`。
+- ⚠️ **坑 2:显存**。官方 ~9GB;本机 RTX 4070 Laptop 只有 **8GB**,可能 OOM。OOM 的话按 `HANDOFF.md §3` 把 server 放另一台 GPU 机(client/server 走 ZMQ TCP,设 `SERVER_IP/SERVER_PORT`)。
+- 自检:`offline_test`(发 mock,见主仓 README)。
+- 起来后:`python scripts/brio_capture.py test --send`(实时采)或写个小 client 读 `brio_out/obs.pkl` 发过去,看回的 `bbox`(两视角套住物体?)和 `goal`(`+(0,0,0.75)→base` 落在物体真实位置?)→ §7 验证里程碑。
+
+### 10.6 环境备忘
+- **GraspVLA server**:conda env `GraspVLA`(py3.9.19)+ `requirements.txt` **+ `einops`**。权重在 HF cache。
+- **采集 + proprio**:conda env `sharpa-dexmate-tmp`(py3.11),有 cv2 + 全套机器人栈;缺 `transforms3d`(已改用 scipy,无需装)。
+- 连机器人前先 `source V2AP-demo/setup.sh`(设 `ROBOT_NAME`/`ROBOT_IP`),或给脚本 `--robot-name/--robot-ip`。
