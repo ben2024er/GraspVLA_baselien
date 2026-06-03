@@ -18,15 +18,20 @@
 | BRIO 采集层(OpenCV)+ 裁剪 → 256×256 | ✅ **完成** `scripts/brio_capture.py`、`scripts/capture_views.py`(§10) |
 | proprio_array(右臂 FK + 右手夹爪,接 V2AP) | ✅ **完成** `scripts/robot_proprio.py`,真机实测通(§10) |
 | 三路输入打包(2×RGB + proprio + text → obs.pkl) | ✅ **完成** `scripts/capture_views.py`(§10) |
-| GraspVLA conda 环境 + 权重下载 | ✅ env `GraspVLA`(py3.9.19);权重在 HF cache(~12GB)|
-| 起 GraspVLA server(需 GPU,~9GB) | ⚠️ 受阻:`requirements.txt` 缺 `einops`;本机 GPU 仅 8GB(<9GB,可能 OOM)(§10.5) |
-| 静态感知验证(bbox/goal,不动机器人) | ⏳ 待做(server 起来后)|
+| GraspVLA conda 环境 + 权重下载 | ✅ blade15 env `GraspVLA`;**A6000 env `graspvla`(py3.9.19, torch2.7.1+cu126, +einops)**;权重 `/home/msc-auto/graspvla_ckpt`(12GB)|
+| **起 GraspVLA server(A6000)** | ✅ **完成**:跑在 A6000(2×RTX A6000 48GB),~10GB 显存,~0.66s/次。首启会从 HF 拉基座 backbone(internlm2-1.8B+DINOv2+SigLIP)|
+| **静态感知验证(bbox,不动机器人)** | ✅ **双视图均通过**(2026-06-03):手退出画面+白板背景+side 略俯视后,front/side 绿框都紧贴罐子;goal 转回 base=`[0.55,0.04,0.89]`(桌面上方 4cm,几何正确)|
+| action 验证(真实 proprio) | ⏳ 待做:当前 proprio 仍占位,需雷蛇发真 FK |
 | 接 V2AP IK/安全层 → 动作执行 | ⏳ 待做 |
 | 真机抓取实测 | ⏳ 待做 |
 
-**下一步(立即)**:`pip install einops` 补依赖 → 起 server(8GB 显存可能 OOM,详见 §10.5)→ 用已采集的 `scripts/brio_out/obs.pkl` 发给 server 做静态 bbox 感知验证。
+**⚠️ 关键 gotcha(2026-06-03)**:`text` 必须用**真实类别名**(`res/category_list.txt`:banana/bottle/box/can...),**不能用 "object"**——用 "object" 返回空 bbox。雷蛇 `text.txt` 现为 "pick up object",需改成实际物体名(如 `pick up bottle`)。
 
-**当前机器**:已在**与机器人直连的电脑**(blade15)上;机器人 `ROBOT_NAME=dm/vgd1262ab823-1p`、`ROBOT_IP=192.168.50.20`(见 `V2AP-demo/setup.sh`)。相机:front=`/dev/video5`、side=`/dev/video9`。
+**下一步(立即)**:① 雷蛇 `text.txt` 改真实类别名;② **从起始姿态(手抬高、移开物体)重采 `obs.pkl`**,让物体在两个视图都不被 Sharpa 手遮挡(当前 side 视图被手挡住→空框);③ 重跑 `scripts/test_client.py` 看两个 bbox 都干净 → 再做 action 侧(用真实 proprio)。
+
+**机器分工**:
+- **A6000**(mscauto-Lambda-Vector,本机):跑 server `conda run -n graspvla python -u -m vla_network.scripts.serve --path /home/msc-auto/graspvla_ckpt/checkpoint/model.safetensors --port 6666`。本地自测 `scripts/test_client.py`。
+- **blade15**(雷蛇,连机器人):采集+proprio+控制,作 client(ZMQ REQ→A6000:6666 发 `pickle(obs)`)。机器人 `ROBOT_IP=192.168.50.20`;相机 front=`/dev/video5`、side=`/dev/video9`。
 
 ---
 
@@ -248,3 +253,85 @@ PYTHONPATH=<repo>/GraspVLA conda run -n GraspVLA python3 -u -m vla_network.scrip
 - **GraspVLA server**:conda env `GraspVLA`(py3.9.19)+ `requirements.txt` **+ `einops`**。权重在 HF cache。
 - **采集 + proprio**:conda env `sharpa-dexmate-tmp`(py3.11),有 cv2 + 全套机器人栈;缺 `transforms3d`(已改用 scipy,无需装)。
 - 连机器人前先 `source V2AP-demo/setup.sh`(设 `ROBOT_NAME`/`ROBOT_IP`),或给脚本 `--robot-name/--robot-ip`。
+
+---
+
+## 11. 雷蛇 ↔ A6000 闭环对接(client 侧开发指南)
+
+> server 已在 A6000(`mscauto-Lambda-Vector`,2×RTX A6000 48GB)跑通并通过静态感知验证(§ Status)。**server 不改,官方 `serve.py`。雷蛇只开发 client 侧。** 可复用模块见 `scripts/graspvla_client.py`(已对着 live server 测通)。
+
+### 11.0 拓扑
+```
+雷蛇 blade15 (client, 连机器人)                    A6000 (server)
+  采集2路RGB + 真实FK proprio + 控制         ZMQ REQ   官方 serve.py :6666
+  组装 obs ──────────────────────────────────────▶  GraspVLA 推理
+  收 action ◀──────────────────────────────────────  {result, debug}
+  Δ→目标位姿→Pink IK→Dexmate;grip→Sharpa虚拟夹爪
+```
+
+### 11.1 A6000 端(server,已就绪,供参考)
+```bash
+conda run -n graspvla python -u -m vla_network.scripts.serve \
+  --path /home/msc-auto/graspvla_ckpt/checkpoint/model.safetensors --port 6666
+```
+- A6000 IP:`128.32.164.89`,端口 `6666`。首启会从 HF 拉基座 backbone(一次性)。
+- 本地自测:`conda run -n graspvla python scripts/test_client.py`(读 `brio_out/obs.pkl`)。
+
+### 11.2 网络连通(雷蛇先做)
+- 同网:`ping 128.32.164.89` 通、`nc -vz 128.32.164.89 6666` 通即可。
+- 跨网/不通:开 SSH 隧道,client 连 `127.0.0.1:6666`:
+  ```bash
+  ssh -N -L 6666:localhost:6666 msc-auto@128.32.164.89
+  ```
+
+### 11.3 通信契约(与 `serve.py` 对齐)
+- socket:**ZMQ REQ** → `tcp://128.32.164.89:6666`;**发** `pickle.dumps(obs)`,**收** `pickle.loads(bytes)`。
+- **obs**(雷蛇 `capture_views.py` 已产出,格式见 §10.4):`text` / `front_view_image` / `side_view_image` / `proprio_array` / `compressed`。
+- **reply**:
+  - `result`:`(N,7)` 动作序列,每步 `[Δx,Δy,Δz,Δroll,Δpitch,Δyaw, grip]`,**graspvla 系增量**(server 已 ×2 插值;`grip∈{-1,0,1}`:−1 关 / 1 开 / 0 不变)。
+  - `debug.pose`:`(pos3, rpy3)` 抓取 goal(graspvla 系绝对位姿)。
+  - `debug.bbox`:`(front_bbox, side_bbox)`,224 尺度。
+
+### 11.4 坐标规则(已锁定:graspvla = base 下移 0.75m,纯平移)
+| 量 | 规则 |
+|---|---|
+| proprio(发送前) | `pos_z -= 0.75`(`robot_proprio.py` 已实现);sxyz;`grip∈[-1,1]` |
+| goal(转回 base) | `pos_z += 0.75`(`graspvla_pos_to_base()`) |
+| **动作增量 Δ** | **平移不影响增量 → 直接用,无需偏移** |
+
+### 11.5 闭环主循环(伪代码)
+```python
+from scripts.graspvla_client import GraspVLAClient, apply_delta_action
+cli = GraspVLAClient("128.32.164.89", 6666)
+while task_running:
+    front, side = capture_two_BRIO()                 # capture_views.py,裁 256×256
+    proprio = robot_proprio.get()                     # 真实 FK,已含 z-0.75 / sxyz / grip∈[-1,1]
+    obs = {"text": "pick up bottle",                  # 真实英文类别名,勿用 "object"
+           "front_view_image": [front], "side_view_image": [side],
+           "proprio_array": proprio_history_4, "compressed": False}
+    reply = cli.infer(obs)
+    cur_pos, cur_R = current_eef_in_base()            # FK(base 系)
+    for delta in reply["result"]:                     # 逐步执行(已插值)
+        tgt_pos, tgt_R, grip = apply_delta_action(cur_pos, cur_R, delta)
+        joints = arm_ik_manager.solve(tgt_pos, tgt_R) # V2AP Pink IK
+        smoothed = safety_mgr.smooth_and_check(joints) # V2AP Ruckig+碰撞
+        robot.set_joint_pos(smoothed)
+        if   grip == -1: sharpa_close()               # virtual_gripper + hand_close
+        elif grip ==  1: sharpa_open()
+        cur_pos, cur_R = tgt_pos, tgt_R
+```
+
+### 11.6 必守 gotcha
+1. **`text` 用真实英文类别名**(`res/category_list.txt`:bottle/can/banana...),**不能 "object"** → 否则空 bbox。
+2. **proprio 用真实 FK**,别用占位值(否则 action 增量无意义)。
+3. **运行期冻结 torso(3-DOF)+ head**(§2),否则 base↔臂/相机不再刚性。
+4. **gripper**:`grip∈{-1,0,1}`,−1 关 / 1 开 / 0 不变 → 映射到 Sharpa 虚拟夹爪(`virtual_gripper.py`+`hand_close.py`)。
+5. **起始观测**:夹爪/手抬离物体、画面干净(静态验证已证:手在画面里会让 side 识别失败)。
+6. **安全**:首次真机手放急停旁;先单物体、放工作区中心(base x 0.35~0.75)。
+
+### 11.7 雷蛇先验连通(不接机器人也能做)
+把 A6000 IP 填进去,直接发已采的 obs:
+```bash
+python scripts/graspvla_client.py --host 128.32.164.89 --port 6666 --text "pick up bottle"
+# 看到 action shape (8,7)、goal、"✓ 闭环 OK" 即链路通
+```

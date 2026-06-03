@@ -24,3 +24,7 @@ venv/
 # 杂项
 .DS_Store
 *.log
+
+# 本地分析可视化产物(不入库)
+scripts/brio_out/bbox_*.png
+scripts/brio_out/side_zoom*.png
