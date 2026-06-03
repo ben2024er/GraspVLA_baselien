@@ -1,0 +1,26 @@
+# 上游第三方仓库（用 scripts/clone_upstream.sh 获取，不纳入本仓库）
+/GraspVLA/
+/GraspVLA-playground/
+/GraspVLA-real-world-controller/
+/V2AP-demo/
+
+# 模型权重 / 数据 / 产物
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+**/sessions/
+**/data/
+**/videos/
+**/*.npy
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# 杂项
+.DS_Store
+*.log
